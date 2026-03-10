@@ -1,0 +1,2134 @@
+From 22c8dcd8a04e76bfa455972610781f51f8bfa2a8 Mon Sep 17 00:00:00 2001
+From: Florian ALEXANDRE <f.alexandre@novactive.com>
+Date: Fri, 13 Feb 2026 09:55:51 +0100
+Subject: [PATCH 1/4] feat: update SEO bundle to work with ibexa 5
+
+---
+ .../AddNovaSEOMetasFieldTypeCommand.php       |  41 +-----
+ .../Controller/Admin/RedirectController.php   | 137 +++++++++---------
+ .../bundle/Controller/SEOController.php       |  21 +--
+ .../bundle/Controller/SitemapController.php   |  33 +++--
+ .../Core/Converter/ContentTypesHelper.php     |  12 +-
+ .../SeoMetadataBooleanFieldType.php           |   3 +
+ .../SeoMetadataChoiceFieldType.php            |   2 +
+ .../SeoMetadataFieldTypeRegistry.php          |   4 +-
+ .../Core/FieldType/Metas/FormMapper.php       |   5 +-
+ .../Core/FieldType/Metas/MetasStorage.php     |   9 +-
+ .../MetasStorage/Gateway/DoctrineStorage.php  |  24 ++-
+ .../bundle/Core/FieldType/Metas/Type.php      |  13 +-
+ .../bundle/Core/FieldType/Metas/Value.php     |   3 +-
+ .../bundle/Core/Helper/ImportUrlsHelper.php   |  73 ++--------
+ .../SEOBundle/bundle/Core/Installer/Field.php |  13 +-
+ components/SEOBundle/bundle/Core/Meta.php     |  51 ++-----
+ .../SEOBundle/bundle/Core/MetaNameSchema.php  |  75 ++++------
+ components/SEOBundle/bundle/Core/SeoMetas.php |   4 +-
+ .../SiteAccessAwareEntityManagerFactory.php   |  91 ------------
+ .../bundle/Core/Sitemap/QueryFactory.php      |  16 +-
+ .../bundle/Core/UrlWildcardRouter.php         |  16 +-
+ .../DependencyInjection/Configuration.php     |   4 +-
+ .../NovaeZSEOExtension.php                    |   2 +
+ .../bundle/Entity/RedirectImportHistory.php   |  31 ++--
+ .../bundle/Form/Type/ImportUrlsType.php       |   2 +
+ .../SEOBundle/bundle/Form/Type/MetaType.php   |  16 +-
+ .../bundle/Form/Type/MetasCollectionType.php  |   3 +
+ .../bundle/Form/Type/MetasFieldType.php       |   2 +
+ .../SEOBundle/bundle/NovaeZSEOBundle.php      |   4 +-
+ .../bundle/Resources/config/ibexa.yaml        |   4 +-
+ .../bundle/Resources/config/routing/main.yaml |   4 +-
+ .../bundle/Resources/config/services.yml      |  23 +--
+ .../views/commun/paginator.html.twig          |   4 +-
+ .../fields/fielddefinition_settings.html.twig |   8 +-
+ .../views/fields/novaseometas_admin.html.twig |   2 +-
+ .../create_url_wildcard.html.twig             |   4 +-
+ .../history_urls_imported.html.twig           |   4 +-
+ .../platform_admin/import_urls.html.twig      |  10 +-
+ .../list_url_wildcard.html.twig               |   4 +-
+ .../bundle/Twig/NovaeZSEOExtension.php        |  20 +--
+ components/SEOBundle/ci-config.yaml           |   6 +-
+ .../tests/Tests/SEOControllerPantherTest.php  |   2 -
+ .../Tests/SitemapControllerPantherTest.php    |   2 -
+ 43 files changed, 285 insertions(+), 522 deletions(-)
+ delete mode 100644 components/SEOBundle/bundle/Core/SiteAccessAwareEntityManagerFactory.php
+
+diff --git a/components/SEOBundle/bundle/Command/AddNovaSEOMetasFieldTypeCommand.php b/components/SEOBundle/bundle/Command/AddNovaSEOMetasFieldTypeCommand.php
+index ee3c11196..444aee8a0 100644
+--- a/components/SEOBundle/bundle/Command/AddNovaSEOMetasFieldTypeCommand.php
++++ b/components/SEOBundle/bundle/Command/AddNovaSEOMetasFieldTypeCommand.php
+@@ -30,44 +30,13 @@
+  */
+ class AddNovaSEOMetasFieldTypeCommand extends Command
+ {
+-    /**
+-     * @var ConfigResolverInterface
+-     */
+-    private $configResolver;
+-
+-    /**
+-     * @var Repository
+-     */
+-    private $repository;
+-
+-    /**
+-     * @var UserService
+-     */
+-    private $userService;
+-
+-    /**
+-     * @var FieldInstaller
+-     */
+-    private $fieldInstaller;
+-
+-    /**
+-     * @var ContentTypesHelper
+-     */
+-    private $contentTypesHelper;
+-
+     public function __construct(
+-        ConfigResolverInterface $configResolver,
+-        Repository $repository,
+-        UserService $userService,
+-        FieldInstaller $fieldInstaller,
+-        ContentTypesHelper $contentTypesHelper
++        private readonly ConfigResolverInterface $configResolver,
++        private readonly Repository $repository,
++        private readonly UserService $userService,
++        private readonly FieldInstaller $fieldInstaller,
++        private readonly ContentTypesHelper $contentTypesHelper
+     ) {
+-        $this->configResolver = $configResolver;
+-        $this->repository = $repository;
+-        $this->userService = $userService;
+-        $this->fieldInstaller = $fieldInstaller;
+-        $this->contentTypesHelper = $contentTypesHelper;
+-
+         parent::__construct();
+     }
+ 
+diff --git a/components/SEOBundle/bundle/Controller/Admin/RedirectController.php b/components/SEOBundle/bundle/Controller/Admin/RedirectController.php
+index 37cc8a277..98d507477 100644
+--- a/components/SEOBundle/bundle/Controller/Admin/RedirectController.php
++++ b/components/SEOBundle/bundle/Controller/Admin/RedirectController.php
+@@ -13,6 +13,7 @@
+ namespace Novactive\Bundle\eZSEOBundle\Controller\Admin;
+ 
+ use Doctrine\ORM\EntityManagerInterface;
++use Exception;
+ use Ibexa\Contracts\AdminUi\Controller\Controller;
+ use Ibexa\Contracts\Core\Repository\PermissionResolver;
+ use Ibexa\Core\Event\URLWildcardService;
+@@ -25,35 +26,36 @@
+ use Pagerfanta\Pagerfanta;
+ use Psr\Log\LoggerInterface;
+ use Psr\Log\LogLevel;
+-use Sensio\Bundle\FrameworkExtraBundle\Configuration\Template;
+ use Symfony\Component\HttpFoundation\File\UploadedFile;
+ use Symfony\Component\HttpFoundation\Request;
+ use Symfony\Component\HttpFoundation\Response;
+ use Symfony\Component\HttpFoundation\ResponseHeaderBag;
+-use Symfony\Component\Routing\Annotation\Route;
+ use Symfony\Component\Security\Core\Exception\AccessDeniedException;
+ use Symfony\Contracts\Translation\TranslatorInterface;
+ 
+ /**
+- * @Route("/novaseo/redirect")
+- *
+  * @SuppressWarnings(PHPMD.NPathComplexity)
+  */
++#[\Symfony\Component\Routing\Attribute\Route(path: '/novaseo/redirect')]
+ class RedirectController extends Controller
+ {
+     public const URL_LIMIT = 10;
+ 
+-    /**
+-     * @Route("/list", name="novaseo_redirect_list")
+-     */
++    public function __construct(
++        protected URLWildcardService $urlWildcardService,
++        protected TranslatorInterface $translator,
++        protected LoggerInterface $logger,
++        protected PermissionResolver $permissionResolver,
++        protected ImportUrlsHelper $importUrlsHelper,
++        protected EntityManagerInterface $entityManager,
++    ) {
++    }
++
++    #[\Symfony\Component\Routing\Attribute\Route(path: '/list', name: 'novaseo_redirect_list')]
+     public function listAction(
+-        Request $request,
+-        URLWildcardService $urlWildcardService,
+-        TranslatorInterface $translator,
+-        LoggerInterface $logger,
+-        PermissionResolver $permissionResolver
++        Request $request
+     ): Response {
+-        if (!$permissionResolver->hasAccess('novaseobundle.redirects', 'view')) {
++        if (!$this->permissionResolver->hasAccess('novaseobundle.redirects', 'view')) {
+             throw new AccessDeniedException('Limited access !!!');
+         }
+ 
+@@ -68,35 +70,39 @@ public function listAction(
+         $formDelete->handleRequest($request);
+ 
+         if ($form->isSubmitted() && $form->isValid()) {
+-            $source = trim($form->getData()['source']);
+-            $destination = trim($form->getData()['destination']);
+-            $type = trim($form->getData()['type']);
++            $source = trim((string) $form->getData()['source']);
++            $destination = trim((string) $form->getData()['destination']);
++            $type = trim((string) $form->getData()['type']);
+ 
+-            if (!$permissionResolver->hasAccess('novaseobundle.redirects', 'add')) {
++            if (!$this->permissionResolver->hasAccess('novaseobundle.redirects', 'add')) {
+                 throw new AccessDeniedException('Limited access !!!');
+             }
+             // verify if URL destination exists in source URL
+             try {
+-                $urlExists = $urlWildcardService->translate($destination);
+-                $errors[] = $translator->trans('nova.redirect.create.exists', ['url' => $destination], 'redirect');
+-            } catch (\Exception $e) {
++                $urlExists = $this->urlWildcardService->translate($destination);
++                $errors[] = $this->translator->trans(
++                    'nova.redirect.create.exists',
++                    ['url' => $destination],
++                    'redirect'
++                );
++            } catch (Exception $e) {
+                 $e->getMessage();
+             }
+ 
+             if (('' !== $source || '' !== $destination) && ($source !== $destination) && (null === $urlExists)) {
+                 try {
+-                    $result = $urlWildcardService->create($source, $destination, $type);
++                    $result = $this->urlWildcardService->create($source, $destination, $type);
+ 
+                     if ($result) {
+-                        $messages[] = $source.' '.$translator->trans('nova.redirect.create.info', [], 'redirect');
++                        $messages[] = $source.' '.$this->translator->trans('nova.redirect.create.info', [], 'redirect');
+                     }
+-                } catch (\Exception $e) {
++                } catch (Exception $e) {
+                     $message = explode(':', $e->getMessage());
+                     $errors[] = isset($message[1]) ? $source.' '.$message[1] : $e->getMessage();
+-                    $logger->log(LogLevel::ERROR, $e->getMessage());
++                    $this->logger->log(LogLevel::ERROR, $e->getMessage());
+                 }
+             } else {
+-                $errors[] = $translator->trans('nova.redirect.create.warnning', [], 'redirect');
++                $errors[] = $this->translator->trans('nova.redirect.create.warnning', [], 'redirect');
+             }
+         }
+ 
+@@ -104,12 +110,12 @@ public function listAction(
+             $deleteAction = self::class.'::deleteAction';
+             $response = $this->forward($deleteAction, ['request' => $request]);
+             if (Response::HTTP_CREATED === $response->getStatusCode()) {
+-                $messages[] = $translator->trans('nova.redirect.delete.info', [], 'redirect');
++                $messages[] = $this->translator->trans('nova.redirect.delete.info', [], 'redirect');
+             }
+         }
+ 
+         $page = $request->query->get('page') ?? 1;
+-        $pagerfanta = new Pagerfanta(new ArrayAdapter($urlWildcardService->loadAll()));
++        $pagerfanta = new Pagerfanta(new ArrayAdapter($this->urlWildcardService->loadAll()));
+ 
+         $pagerfanta->setMaxPerPage(self::URL_LIMIT);
+         $pagerfanta->setCurrentPage(min($page, $pagerfanta->getNbPages()));
+@@ -128,11 +134,8 @@ public function listAction(
+ 
+     public function deleteAction(
+         Request $request,
+-        URLWildcardService $urlWildcardService,
+-        LoggerInterface $logger,
+-        PermissionResolver $permissionResolver
+     ): Response {
+-        if (!$permissionResolver->hasAccess('novaseobundle.redirects', 'remove')) {
++        if (!$this->permissionResolver->hasAccess('novaseobundle.redirects', 'remove')) {
+             throw new AccessDeniedException('Limited access !!!');
+         }
+         $urlWildCardChoice = $request->get('WildcardIDList');
+@@ -140,32 +143,28 @@ public function deleteAction(
+         try {
+             if ($urlWildCardChoice) {
+                 foreach ($urlWildCardChoice as $item) {
+-                    $urlWildCard = $urlWildcardService->load($item);
+-                    $urlWildcardService->remove($urlWildCard);
++                    $urlWildCard = $this->urlWildcardService->load($item);
++                    $this->urlWildcardService->remove($urlWildCard);
+                 }
+ 
+                 return new Response(null, 201);
+             }
+-        } catch (\Exception $e) {
+-            $logger->log(LogLevel::ERROR, $e->getMessage());
++        } catch (Exception $e) {
++            $this->logger->log(LogLevel::ERROR, $e->getMessage());
+         }
+ 
+         return new Response();
+     }
+ 
+-    /**
+-     * @Route("/url-redirect-import", name="novactive_platform_admin_ui.import-redirect-url")
+-     *
+-     * @Template("@NovaeZSEO/platform_admin/import_urls.html.twig")
+-     */
++    #[\Symfony\Bridge\Twig\Attribute\Template('@NovaeZSEO/platform_admin/import_urls.html.twig')]
++    #[\Symfony\Component\Routing\Attribute\Route(
++        path: '/url-redirect-import',
++        name: 'novactive_platform_admin_ui.import-redirect-url'
++    )]
+     public function importAction(
+-        Request $request,
+-        PermissionResolver $permissionResolver,
+-        ImportUrlsHelper $importUrlsHelper,
+-        LoggerInterface $logger,
+-        TranslatorInterface $translator
++        Request $request
+     ): array {
+-        if (!$permissionResolver->hasAccess('novaseobundle.redirects', 'import')) {
++        if (!$this->permissionResolver->hasAccess('novaseobundle.redirects', 'import')) {
+             throw new AccessDeniedException('Limited access !!!');
+         }
+ 
+@@ -181,21 +180,21 @@ public function importAction(
+                 $filePath = $file->getRealPath();
+                 if ('text/plain' === $file->getMimeType()) {
+                     try {
+-                        $resultUrlsImported = $importUrlsHelper->importUrlRedirection($filePath);
++                        $resultUrlsImported = $this->importUrlsHelper->importUrlRedirection($filePath);
+                         if (isset($resultUrlsImported['errorType'])) {
+                             $params['errors'][] = $resultUrlsImported['errorType'];
+                         } else {
+-                            $importUrlsHelper->saveFileHistory(
++                            $this->importUrlsHelper->saveFileHistory(
+                                 $file->getClientOriginalName(),
+                                 $resultUrlsImported['fileLog']
+                             );
+                             $session->set('IMPORT_URL', $resultUrlsImported);
+                         }
+-                    } catch (\Exception $e) {
+-                        $logger->log(LogLevel::ERROR, $e->getMessage());
++                    } catch (Exception $e) {
++                        $this->logger->log(LogLevel::ERROR, $e->getMessage());
+                     }
+                 } else {
+-                    $params['errors'][] = $translator->trans(
++                    $params['errors'][] = $this->translator->trans(
+                         'nova.import.root.form.error.invalid_type',
+                         [],
+                         'redirect'
+@@ -224,20 +223,18 @@ public function importAction(
+         return $params;
+     }
+ 
+-    /**
+-     * @Route("/history-import-redirect-url", name="novactive_platform_admin_ui.history-import-redirect-url")
+-     *
+-     * @Template("@NovaeZSEO/platform_admin/history_urls_imported.html.twig")
+-     */
++    #[\Symfony\Bridge\Twig\Attribute\Template('@NovaeZSEO/platform_admin/history_urls_imported.html.twig')]
++    #[\Symfony\Component\Routing\Attribute\Route(
++        path: '/history-import-redirect-url',
++        name: 'novactive_platform_admin_ui.history-import-redirect-url'
++    )]
+     public function historyUrlsImported(
+-        Request $request,
+-        ImportUrlsHelper $importUrlsHelper,
+-        PermissionResolver $permissionResolver
++        Request $request
+     ): array {
+-        if (!$permissionResolver->hasAccess('novaseobundle.redirects', 'import')) {
++        if (!$this->permissionResolver->hasAccess('novaseobundle.redirects', 'import')) {
+             throw new AccessDeniedException('Limited access !!!');
+         }
+-        $result = $importUrlsHelper->getLogsHistory();
++        $result = $this->importUrlsHelper->getLogsHistory();
+         $params = [];
+         if (count($result) > 0) {
+             $page = $request->query->get('page') ?? 1;
+@@ -252,21 +249,19 @@ public function historyUrlsImported(
+         return $params;
+     }
+ 
+-    /**
+-     * @Route("/download-log-redirect-url/{id}", name="novactive_platform_admin_ui.download-log-redirect-url")
+-     */
++    #[\Symfony\Component\Routing\Attribute\Route(
++        path: '/download-log-redirect-url/{id}',
++        name: 'novactive_platform_admin_ui.download-log-redirect-url'
++    )]
+     public function downloadAction(
+-        int $id,
+-        EntityManagerInterface $entityManager,
+-        ImportUrlsHelper $importUrlsHelper,
+-        PermissionResolver $permissionResolver
++        int $id
+     ): Response {
+-        if (!$permissionResolver->hasAccess('novaseobundle.redirects', 'import')) {
++        if (!$this->permissionResolver->hasAccess('novaseobundle.redirects', 'import')) {
+             throw new AccessDeniedException('Limited access !!!');
+         }
+-        $log = $entityManager->getRepository(RedirectImportHistory::class)->find($id);
++        $log = $this->entityManager->getRepository(RedirectImportHistory::class)->find($id);
+         if ($log instanceof RedirectImportHistory) {
+-            $fileContent = $importUrlsHelper->downloadFile($log);
++            $fileContent = $this->importUrlsHelper->downloadFile($log);
+             if ($fileContent) {
+                 $response = new Response($fileContent);
+                 $disposition = $response->headers->makeDisposition(
+diff --git a/components/SEOBundle/bundle/Controller/SEOController.php b/components/SEOBundle/bundle/Controller/SEOController.php
+index e110fdb64..3c566bc2a 100644
+--- a/components/SEOBundle/bundle/Controller/SEOController.php
++++ b/components/SEOBundle/bundle/Controller/SEOController.php
+@@ -16,16 +16,14 @@
+ use Ibexa\Bundle\Core\Controller;
+ use Symfony\Component\HttpFoundation\Response;
+ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
+-use Symfony\Component\Routing\Annotation\Route;
+ use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
+ 
+ class SEOController extends Controller
+ {
+     /**
+-     * @Route("/robots.txt", methods={"GET"})
+-     *
+      * @SuppressWarnings(PHPMD.NPathComplexity)
+      */
++    #[\Symfony\Component\Routing\Attribute\Route(path: '/robots.txt', methods: ['GET'])]
+     public function robotsAction(): Response
+     {
+         $response = new Response();
+@@ -33,7 +31,10 @@ public function robotsAction(): Response
+         $robots = ['User-agent: *'];
+ 
+         $robotsRules = $this->getConfigResolver()->getParameter('robots', 'nova_ezseo');
+-        $backwardCompatibleRules = $this->getConfigResolver()->getParameter('robots_disallow', 'nova_ezseo');
++        $backwardCompatibleRules = $this->getConfigResolver()->getParameter(
++            'robots_disallow',
++            'nova_ezseo'
++        );
+ 
+         if (\is_array($robotsRules['sitemap'])) {
+             foreach ($robotsRules['sitemap'] as $sitemapRules) {
+@@ -75,9 +76,11 @@ public function robotsAction(): Response
+         return $response;
+     }
+ 
+-    /**
+-     * @Route("/google{key}.html", requirements={ "key": "[a-zA-Z0-9]*" }, methods={"GET"})
+-     */
++    #[\Symfony\Component\Routing\Attribute\Route(
++        path: '/google{key}.html',
++        requirements: ['key' => '[a-zA-Z0-9]*'],
++        methods: ['GET']
++    )]
+     public function googleVerifAction(string $key): Response
+     {
+         if ($this->getConfigResolver()->getParameter('google_verification', 'nova_ezseo') !== $key) {
+@@ -90,9 +93,7 @@ public function googleVerifAction(string $key): Response
+         return $response;
+     }
+ 
+-    /**
+-     * @Route("/BingSiteAuth.xml", methods={"GET"})
+-     */
++    #[\Symfony\Component\Routing\Attribute\Route(path: '/BingSiteAuth.xml', methods: ['GET'])]
+     public function bingVerifAction(): Response
+     {
+         if (!$this->getConfigResolver()->hasParameter('bing_verification', 'nova_ezseo')) {
+diff --git a/components/SEOBundle/bundle/Controller/SitemapController.php b/components/SEOBundle/bundle/Controller/SitemapController.php
+index 76572b861..1e3b65010 100644
+--- a/components/SEOBundle/bundle/Controller/SitemapController.php
++++ b/components/SEOBundle/bundle/Controller/SitemapController.php
+@@ -14,6 +14,8 @@
+ 
+ use DateTime;
+ use DOMDocument;
++use DOMElement;
++use Exception;
+ use Ibexa\Bundle\Core\Controller;
+ use Ibexa\Contracts\Core\Repository\Values\Content\Location;
+ use Ibexa\Contracts\Core\Repository\Values\Content\Search\SearchResult;
+@@ -22,7 +24,6 @@
+ use Ibexa\Core\MVC\Symfony\Routing\UrlAliasRouter;
+ use Novactive\Bundle\eZSEOBundle\Core\Sitemap\QueryFactory;
+ use Symfony\Component\HttpFoundation\Response;
+-use Symfony\Component\Routing\Annotation\Route;
+ use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
+ 
+ class SitemapController extends Controller
+@@ -40,9 +41,11 @@ public function __construct(
+     ) {
+     }
+ 
+-    /**
+-     * @Route("/sitemap.xml", name="_novaseo_sitemap_index", methods={"GET"})
+-     */
++    #[\Symfony\Component\Routing\Attribute\Route(
++        path: '/sitemap.xml',
++        name: '_novaseo_sitemap_index',
++        methods: ['GET']
++    )]
+     public function indexAction(QueryFactory $queryFactory): Response
+     {
+         $searchService = $this->getRepository()->getSearchService();
+@@ -78,11 +81,13 @@ public function indexAction(QueryFactory $queryFactory): Response
+         return $response;
+     }
+ 
+-    /**
+-     * @Route("/sitemap-{page}.xml", name="_novaseo_sitemap_page", requirements={"page" = "\d+"},
+-     *                                                             defaults={"page" = 1},
+-     *                                                             methods={"GET"})
+-     */
++    #[\Symfony\Component\Routing\Attribute\Route(
++        path: '/sitemap-{page}.xml',
++        name: '_novaseo_sitemap_page',
++        requirements: ['page' => '\d+'],
++        defaults: ['page' => 1],
++        methods: ['GET']
++    )]
+     public function pageAction(QueryFactory $queryFactory, int $page = 1): Response
+     {
+         $sitemap = new DOMDocument('1.0', 'UTF-8');
+@@ -108,7 +113,7 @@ public function pageAction(QueryFactory $queryFactory, int $page = 1): Response
+     /**
+      * Fill a sitemap.
+      */
+-    protected function fillSitemap(DOMDocument $sitemap, \DOMElement $root, SearchResult $results): void
++    protected function fillSitemap(DOMDocument $sitemap, DOMElement $root, SearchResult $results): void
+     {
+         foreach ($results->searchHits as $searchHit) {
+             /** @var Location $location */
+@@ -120,14 +125,14 @@ protected function fillSitemap(DOMDocument $sitemap, \DOMElement $root, SearchRe
+                     ['locationId' => $location->id],
+                     UrlGeneratorInterface::ABSOLUTE_URL
+                 );
+-            } catch (\Exception $exception) {
++            } catch (Exception $exception) {
+                 if ($this->has('logger')) {
+                     $this->get('logger')->error('NovaeZSEO: '.$exception->getMessage());
+                 }
+                 continue;
+             }
+ 
+-            if (0 != strpos($url, 'view/content/')) {
++            if (!str_starts_with($url, 'view/content/')) {
+                 continue;
+             }
+ 
+@@ -177,7 +182,7 @@ protected function fillSitemap(DOMDocument $sitemap, \DOMElement $root, SearchRe
+     /**
+      * Fill the sitemap index.
+      */
+-    protected function fillSitemapIndex(DOMDocument $sitemap, int $numberOfResults, \DOMElement $root): void
++    protected function fillSitemapIndex(DOMDocument $sitemap, int $numberOfResults, DOMElement $root): void
+     {
+         $numberOfPage = (int) ceil($numberOfResults / static::PACKET_MAX);
+         for ($sitemapNumber = 1; $sitemapNumber <= $numberOfPage; ++$sitemapNumber) {
+@@ -189,7 +194,7 @@ protected function fillSitemapIndex(DOMDocument $sitemap, int $numberOfResults,
+                     ['page' => $sitemapNumber],
+                     UrlGeneratorInterface::ABSOLUTE_URL
+                 );
+-            } catch (\Exception $exception) {
++            } catch (Exception $exception) {
+                 if ($this->has('logger')) {
+                     $this->get('logger')->error('NovaeZSEO: '.$exception->getMessage());
+                 }
+diff --git a/components/SEOBundle/bundle/Core/Converter/ContentTypesHelper.php b/components/SEOBundle/bundle/Core/Converter/ContentTypesHelper.php
+index add85ab97..e3eb92617 100644
+--- a/components/SEOBundle/bundle/Core/Converter/ContentTypesHelper.php
++++ b/components/SEOBundle/bundle/Core/Converter/ContentTypesHelper.php
+@@ -6,20 +6,14 @@
+ 
+ class ContentTypesHelper
+ {
+-    /**
+-     * @var ContentTypeService
+-     */
+-    private $contentTypeService;
+-
+-    public function __construct(ContentTypeService $contentTypeService)
++    public function __construct(private readonly ContentTypeService $contentTypeService)
+     {
+-        $this->contentTypeService = $contentTypeService;
+     }
+ 
+     public function getContentTypesByIdentifier($identifier): array
+     {
+-        if (false !== strpos($identifier, ',')) {
+-            $contentTypeArray = explode(',', $identifier);
++        if (str_contains((string) $identifier, ',')) {
++            $contentTypeArray = explode(',', (string) $identifier);
+         } else {
+             $contentTypeArray[] = $identifier;
+         }
+diff --git a/components/SEOBundle/bundle/Core/FieldType/MetaFieldConverter/SeoMetadataBooleanFieldType.php b/components/SEOBundle/bundle/Core/FieldType/MetaFieldConverter/SeoMetadataBooleanFieldType.php
+index f71aefc61..8db6b50ff 100644
+--- a/components/SEOBundle/bundle/Core/FieldType/MetaFieldConverter/SeoMetadataBooleanFieldType.php
++++ b/components/SEOBundle/bundle/Core/FieldType/MetaFieldConverter/SeoMetadataBooleanFieldType.php
+@@ -13,6 +13,7 @@
+ namespace Novactive\Bundle\eZSEOBundle\Core\FieldType\MetaFieldConverter;
+ 
+ use Novactive\Bundle\eZSEOBundle\Core\Meta;
++use Override;
+ use Symfony\Component\Form\Extension\Core\Type\CheckboxType;
+ use Symfony\Component\Form\FormBuilderInterface;
+ 
+@@ -20,6 +21,7 @@ class SeoMetadataBooleanFieldType extends SeoMetadataDefaultFieldType
+ {
+     public const IDENTIFIER = 'boolean';
+ 
++    #[Override]
+     public function fromHash($hash): Meta
+     {
+         $meta = parent::fromHash($hash);
+@@ -29,6 +31,7 @@ public function fromHash($hash): Meta
+         return $meta;
+     }
+ 
++    #[Override]
+     public function mapForm(FormBuilderInterface &$builder, array $params)
+     {
+         $option = [
+diff --git a/components/SEOBundle/bundle/Core/FieldType/MetaFieldConverter/SeoMetadataChoiceFieldType.php b/components/SEOBundle/bundle/Core/FieldType/MetaFieldConverter/SeoMetadataChoiceFieldType.php
+index 64fc9d2d4..3837905a4 100644
+--- a/components/SEOBundle/bundle/Core/FieldType/MetaFieldConverter/SeoMetadataChoiceFieldType.php
++++ b/components/SEOBundle/bundle/Core/FieldType/MetaFieldConverter/SeoMetadataChoiceFieldType.php
+@@ -12,6 +12,7 @@
+ 
+ namespace Novactive\Bundle\eZSEOBundle\Core\FieldType\MetaFieldConverter;
+ 
++use Override;
+ use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
+ use Symfony\Component\Form\FormBuilderInterface;
+ 
+@@ -19,6 +20,7 @@ class SeoMetadataChoiceFieldType extends SeoMetadataDefaultFieldType
+ {
+     public const IDENTIFIER = 'select';
+ 
++    #[Override]
+     public function mapForm(FormBuilderInterface &$builder, array $params)
+     {
+         $builder->add(
+diff --git a/components/SEOBundle/bundle/Core/FieldType/MetaFieldConverter/SeoMetadataFieldTypeRegistry.php b/components/SEOBundle/bundle/Core/FieldType/MetaFieldConverter/SeoMetadataFieldTypeRegistry.php
+index 4fe4077b3..6abe91aee 100644
+--- a/components/SEOBundle/bundle/Core/FieldType/MetaFieldConverter/SeoMetadataFieldTypeRegistry.php
++++ b/components/SEOBundle/bundle/Core/FieldType/MetaFieldConverter/SeoMetadataFieldTypeRegistry.php
+@@ -35,9 +35,7 @@ public function __construct(iterable $metaFieldTypes)
+         }
+     }
+ 
+-    /**
+-     * @required
+-     */
++    #[\Symfony\Contracts\Service\Attribute\Required]
+     public function setConfigResolver(ConfigResolverInterface $configResolver): void
+     {
+         $this->configResolver = $configResolver;
+diff --git a/components/SEOBundle/bundle/Core/FieldType/Metas/FormMapper.php b/components/SEOBundle/bundle/Core/FieldType/Metas/FormMapper.php
+index 090e4af67..18d440672 100644
+--- a/components/SEOBundle/bundle/Core/FieldType/Metas/FormMapper.php
++++ b/components/SEOBundle/bundle/Core/FieldType/Metas/FormMapper.php
+@@ -26,14 +26,11 @@
+ 
+ class FormMapper implements FieldDefinitionFormMapperInterface, FieldValueFormMapperInterface
+ {
+-    protected ConfigResolverInterface $configResolver;
+-
+     /**
+      * FormMapper constructor.
+      */
+-    public function __construct(ConfigResolverInterface $configResolver)
++    public function __construct(protected ConfigResolverInterface $configResolver)
+     {
+-        $this->configResolver = $configResolver;
+     }
+ 
+     /**
+diff --git a/components/SEOBundle/bundle/Core/FieldType/Metas/MetasStorage.php b/components/SEOBundle/bundle/Core/FieldType/Metas/MetasStorage.php
+index b80501e16..d6ccce6c8 100644
+--- a/components/SEOBundle/bundle/Core/FieldType/Metas/MetasStorage.php
++++ b/components/SEOBundle/bundle/Core/FieldType/Metas/MetasStorage.php
+@@ -13,6 +13,7 @@
+ namespace Novactive\Bundle\eZSEOBundle\Core\FieldType\Metas;
+ 
+ use Ibexa\Contracts\Core\FieldType\GatewayBasedStorage;
++use Ibexa\Contracts\Core\FieldType\StorageGatewayInterface;
+ use Ibexa\Contracts\Core\Persistence\Content\Field;
+ use Ibexa\Contracts\Core\Persistence\Content\VersionInfo;
+ 
+@@ -21,12 +22,12 @@ class MetasStorage extends GatewayBasedStorage
+     /**
+      * @var MetasStorage\Gateway
+      */
+-    protected $gateway;
++    protected StorageGatewayInterface $gateway;
+ 
+     /**
+      * Stores value for $field in an external data source.
+      */
+-    public function storeFieldData(VersionInfo $versionInfo, Field $field, array $context): void
++    public function storeFieldData(VersionInfo $versionInfo, Field $field, ?array $context = null): void
+     {
+         if (empty($field->value->externalData)) {
+             return;
+@@ -43,7 +44,7 @@ public function storeFieldData(VersionInfo $versionInfo, Field $field, array $co
+     /**
+      * Populates $field value property based on the external data.
+      */
+-    public function getFieldData(VersionInfo $versionInfo, Field $field, array $context): void
++    public function getFieldData(VersionInfo $versionInfo, Field $field, ?array $context = null): void
+     {
+         $this->gateway->getFieldData($versionInfo, $field);
+     }
+@@ -52,7 +53,7 @@ public function getFieldData(VersionInfo $versionInfo, Field $field, array $cont
+      * Deletes field data for all $fieldIds in the version identified by
+      * $versionInfo.
+      */
+-    public function deleteFieldData(VersionInfo $versionInfo, array $fieldIds, array $context): void
++    public function deleteFieldData(VersionInfo $versionInfo, array $fieldIds, ?array $context = null): void
+     {
+         $this->gateway->deleteFieldData($versionInfo, $fieldIds);
+     }
+diff --git a/components/SEOBundle/bundle/Core/FieldType/Metas/MetasStorage/Gateway/DoctrineStorage.php b/components/SEOBundle/bundle/Core/FieldType/Metas/MetasStorage/Gateway/DoctrineStorage.php
+index a89fa12d3..5a2b75ef1 100644
+--- a/components/SEOBundle/bundle/Core/FieldType/Metas/MetasStorage/Gateway/DoctrineStorage.php
++++ b/components/SEOBundle/bundle/Core/FieldType/Metas/MetasStorage/Gateway/DoctrineStorage.php
+@@ -13,14 +13,8 @@ class DoctrineStorage extends Gateway
+ {
+     public const TABLE = 'novaseo_meta';
+ 
+-    /**
+-     * @var Connection
+-     */
+-    private $connection;
+-
+-    public function __construct(Connection $connection)
++    public function __construct(private readonly Connection $connection)
+     {
+-        $this->connection = $connection;
+     }
+ 
+     public function storeFieldData(VersionInfo $versionInfo, Field $field): void
+@@ -37,10 +31,10 @@ public function storeFieldData(VersionInfo $versionInfo, Field $field): void
+                         $this->connection->quoteIdentifier('objectattribute_version') => ':objectattribute_version',
+                     ]
+                 )
+-                ->setParameter(':meta_name', $meta['meta_name'], ParameterType::STRING)
+-                ->setParameter(':meta_content', $meta['meta_content'], ParameterType::STRING)
+-                ->setParameter(':objectattribute_id', $field->id, ParameterType::INTEGER)
+-                ->setParameter(':objectattribute_version', $versionInfo->versionNo, ParameterType::INTEGER);
++                ->setParameter('meta_name', $meta['meta_name'], ParameterType::STRING)
++                ->setParameter('meta_content', $meta['meta_content'], ParameterType::STRING)
++                ->setParameter('objectattribute_id', $field->id, ParameterType::INTEGER)
++                ->setParameter('objectattribute_version', $versionInfo->versionNo, ParameterType::INTEGER);
+ 
+             $insertQuery->execute();
+         }
+@@ -68,7 +62,7 @@ public function deleteFieldData(VersionInfo $versionInfo, array $fieldIds): void
+                     )
+                 )
+             )
+-            ->setParameter(':version', $versionInfo->versionNo, ParameterType::INTEGER);
++            ->setParameter('version', $versionInfo->versionNo, ParameterType::INTEGER);
+ 
+         $deleteQuery->execute();
+     }
+@@ -81,7 +75,7 @@ public function loadFieldData(VersionInfo $versionInfo, Field $field): array
+             ->distinct()
+             ->from($this->connection->quoteIdentifier(self::TABLE))
+             ->where(
+-                $selectQuery->expr()->andX(
++                $selectQuery->expr()->and(
+                     $selectQuery->expr()->eq(
+                         $this->connection->quoteIdentifier('objectattribute_id'),
+                         ':objectattribute_id'
+@@ -92,8 +86,8 @@ public function loadFieldData(VersionInfo $versionInfo, Field $field): array
+                     )
+                 )
+             )
+-            ->setParameter(':objectattribute_id', $field->id, ParameterType::INTEGER)
+-            ->setParameter(':objectattribute_version', $versionInfo->versionNo, ParameterType::INTEGER);
++            ->setParameter('objectattribute_id', $field->id, ParameterType::INTEGER)
++            ->setParameter('objectattribute_version', $versionInfo->versionNo, ParameterType::INTEGER);
+ 
+         $statement = $selectQuery->execute();
+ 
+diff --git a/components/SEOBundle/bundle/Core/FieldType/Metas/Type.php b/components/SEOBundle/bundle/Core/FieldType/Metas/Type.php
+index ba334ff69..dc26ccf5b 100644
+--- a/components/SEOBundle/bundle/Core/FieldType/Metas/Type.php
++++ b/components/SEOBundle/bundle/Core/FieldType/Metas/Type.php
+@@ -21,6 +21,7 @@
+ use Ibexa\Core\FieldType\Value as CoreValue;
+ use Novactive\Bundle\eZSEOBundle\Core\FieldType\MetaFieldConverter\SeoMetadataFieldTypeRegistry;
+ use Novactive\Bundle\eZSEOBundle\Core\Meta;
++use Override;
+ 
+ class Type extends FieldType
+ {
+@@ -36,17 +37,14 @@ class Type extends FieldType
+         ],
+     ];
+ 
+-    protected SeoMetadataFieldTypeRegistry $metadataFieldTypeRegistry;
+-
+-    public function __construct(
+-        SeoMetadataFieldTypeRegistry $metadataFieldTypeRegistry
+-    ) {
+-        $this->metadataFieldTypeRegistry = $metadataFieldTypeRegistry;
++    public function __construct(protected SeoMetadataFieldTypeRegistry $metadataFieldTypeRegistry)
++    {
+     }
+ 
+     /**
+      * Validates the fieldSettings of a FieldDefinitionCreateStruct or FieldDefinitionUpdateStruct.
+      */
++    #[Override]
+     public function validateFieldSettings($fieldSettings): array
+     {
+         $validationErrors = [];
+@@ -182,6 +180,7 @@ public function toHash(SPIValue $value): array
+     /**
+      * Converts a $value to a persistence value.
+      */
++    #[Override]
+     public function toPersistenceValue(SPIValue $value): FieldValue
+     {
+         return new FieldValue(
+@@ -196,6 +195,7 @@ public function toPersistenceValue(SPIValue $value): FieldValue
+     /**
+      * Converts a persistence $fieldValue to a Value.
+      */
++    #[Override]
+     public function fromPersistenceValue(FieldValue $fieldValue): Value
+     {
+         return $this->fromHash($fieldValue->externalData);
+@@ -204,6 +204,7 @@ public function fromPersistenceValue(FieldValue $fieldValue): Value
+     /**
+      * Returns if the given $value is considered empty by the field type.
+      */
++    #[Override]
+     public function isEmptyValue(SPIValue $value): bool
+     {
+         return null === $value || $value->metas == $this->getEmptyValue()->metas;
+diff --git a/components/SEOBundle/bundle/Core/FieldType/Metas/Value.php b/components/SEOBundle/bundle/Core/FieldType/Metas/Value.php
+index 7c7d38281..3a54650ea 100644
+--- a/components/SEOBundle/bundle/Core/FieldType/Metas/Value.php
++++ b/components/SEOBundle/bundle/Core/FieldType/Metas/Value.php
+@@ -14,8 +14,9 @@
+ 
+ use Ibexa\Core\FieldType\Value as BaseValue;
+ use Novactive\Bundle\eZSEOBundle\Core\Meta;
++use Stringable;
+ 
+-class Value extends BaseValue
++class Value extends BaseValue implements Stringable
+ {
+     /**
+      * Array of Meta.
+diff --git a/components/SEOBundle/bundle/Core/Helper/ImportUrlsHelper.php b/components/SEOBundle/bundle/Core/Helper/ImportUrlsHelper.php
+index e67760f19..eaa9d6a03 100644
+--- a/components/SEOBundle/bundle/Core/Helper/ImportUrlsHelper.php
++++ b/components/SEOBundle/bundle/Core/Helper/ImportUrlsHelper.php
+@@ -14,6 +14,7 @@
+ 
+ use DateTime;
+ use Doctrine\ORM\EntityManagerInterface;
++use Exception;
+ use Ibexa\Contracts\Core\Repository\URLWildcardService;
+ use Ibexa\Core\IO\IOService;
+ use Novactive\Bundle\eZSEOBundle\Entity\RedirectImportHistory;
+@@ -24,57 +25,15 @@
+ 
+ class ImportUrlsHelper
+ {
+-    /**
+-     * @var URLWildcardService
+-     */
+-    private $urlWildCardService;
+-
+-    /**
+-     * @var LoggerInterface
+-     */
+-    private $logger;
+-
+-    /**
+-     * @var TranslatorInterface
+-     */
+-    private $translator;
+-
+-    /**
+-     * @var EntityManagerInterface
+-     */
+-    private $entityManager;
+-
+-    /**
+-     * @var Filesystem
+-     */
+-    private $fs;
+-
+-    /**
+-     * @var IOService
+-     */
+-    private $ioService;
+-
+-    /**
+-     * @var string
+-     */
+-    private $cacheDirectory;
+-
+     public function __construct(
+-        IOService $ioService,
+-        URLWildcardService $urlWildcardService,
+-        EntityManagerInterface $entityManager,
+-        TranslatorInterface $translator,
+-        LoggerInterface $logger,
+-        Filesystem $fileSystem,
+-        string $cacheDirectory
++        private readonly IOService $ioService,
++        private readonly URLWildcardService $urlWildCardService,
++        private readonly EntityManagerInterface $entityManager,
++        private readonly TranslatorInterface $translator,
++        private readonly LoggerInterface $logger,
++        private readonly Filesystem $fs,
++        private readonly string $cacheDirectory
+     ) {
+-        $this->urlWildCardService = $urlWildcardService;
+-        $this->entityManager = $entityManager;
+-        $this->cacheDirectory = $cacheDirectory;
+-        $this->translator = $translator;
+-        $this->logger = $logger;
+-        $this->fs = $fileSystem;
+-        $this->ioService = $ioService;
+     }
+ 
+     public function importUrlRedirection(string $filePath): array
+@@ -104,9 +63,9 @@ public function importUrlRedirection(string $filePath): array
+                     $verifResult = $this->checkUrlDestinationExist($destination);
+ 
+                     if (
+-                        ('' != $source || '' != $destination)
+-                        && ($source != $destination)
+-                        && !$verifResult
++                        ('' != $source || '' != $destination) &&
++                        ($source != $destination) &&
++                        !$verifResult
+                     ) {
+                         // try to save data in table ezurlwildcard
+                         $saveResult = $this->saveUrls($filePath, $source, $destination);
+@@ -143,7 +102,7 @@ public function importUrlRedirection(string $filePath): array
+                     $uploadedFileStruct->id = $filename;
+                     $this->ioService->createBinaryFile($uploadedFileStruct);
+                     $this->fs->remove($filePath);
+-                } catch (\Exception $e) {
++                } catch (Exception $e) {
+                     $this->logger->log(LogLevel::ERROR, $e->getMessage());
+                 }
+             }
+@@ -165,7 +124,7 @@ public function checkUrlDestinationExist(string $destination): bool
+ 
+         try {
+             $urlExists = $this->urlWildCardService->translate($destination);
+-        } catch (\Exception $e) {
++        } catch (Exception $e) {
+             $this->logger->log(LogLevel::ERROR, $e->getMessage());
+         }
+ 
+@@ -192,7 +151,7 @@ public function saveUrls(string $filePath, string $source, string $destination):
+                     "$source;$destination;$msg;$status\n"
+                 );
+             }
+-        } catch (\Exception $e) {
++        } catch (Exception $e) {
+             $return = [
+                 'source' => $source,
+                 'destination' => $destination,
+@@ -220,7 +179,7 @@ public function saveFileHistory(string $originalFileName, string $fileLog): void
+             $redirectImportHistory->setPath($fileLog);
+             $this->entityManager->persist($redirectImportHistory);
+             $this->entityManager->flush();
+-        } catch (\Exception $e) {
++        } catch (Exception $e) {
+             $this->logger->log(LogLevel::ERROR, $e->getMessage());
+         }
+     }
+@@ -231,7 +190,7 @@ public function downloadFile(RedirectImportHistory $log): ?string
+             $file = $this->ioService->loadBinaryFile($log->getPath());
+ 
+             return $this->ioService->getFileContents($file);
+-        } catch (\Exception $e) {
++        } catch (Exception $e) {
+             $this->logger->log(LogLevel::ERROR, $e->getMessage());
+         }
+ 
+diff --git a/components/SEOBundle/bundle/Core/Installer/Field.php b/components/SEOBundle/bundle/Core/Installer/Field.php
+index 06e2fff02..b986827d8 100644
+--- a/components/SEOBundle/bundle/Core/Installer/Field.php
++++ b/components/SEOBundle/bundle/Core/Installer/Field.php
+@@ -3,6 +3,7 @@
+ namespace Novactive\Bundle\eZSEOBundle\Core\Installer;
+ 
+ use DateTime;
++use Exception;
+ use Ibexa\Contracts\Core\Repository\ContentTypeService;
+ use Ibexa\Contracts\Core\Repository\Exceptions\NotFoundException;
+ use Ibexa\Contracts\Core\Repository\Values\ContentType\ContentType;
+@@ -10,10 +11,6 @@
+ 
+ class Field
+ {
+-    private ContentTypeService $contentTypeService;
+-
+-    private ConfigResolverInterface $configResolver;
+-
+     /**
+      * @var string
+      */
+@@ -23,11 +20,9 @@ class Field
+      * Constructor.
+      */
+     public function __construct(
+-        ContentTypeService $contentTypeService,
+-        ConfigResolverInterface $configResolver
++        private readonly ContentTypeService $contentTypeService,
++        private readonly ConfigResolverInterface $configResolver
+     ) {
+-        $this->contentTypeService = $contentTypeService;
+-        $this->configResolver = $configResolver;
+     }
+ 
+     public function addToContentType(string $fieldName, ContentType $contentType): bool
+@@ -80,7 +75,7 @@ public function addToContentType(string $fieldName, ContentType $contentType): b
+             $this->contentTypeService->publishContentTypeDraft($contentTypeDraft);
+ 
+             return true;
+-        } catch (\Exception $e) {
++        } catch (Exception $e) {
+             $this->errorMessage = $e->getMessage();
+ 
+             return false;
+diff --git a/components/SEOBundle/bundle/Core/Meta.php b/components/SEOBundle/bundle/Core/Meta.php
+index 11b082b2a..f0ad930d1 100644
+--- a/components/SEOBundle/bundle/Core/Meta.php
++++ b/components/SEOBundle/bundle/Core/Meta.php
+@@ -16,30 +16,17 @@
+ 
+ class Meta
+ {
+-    protected ?string $name = null;
+-    protected ?string $content = null;
+-    protected ?string $fieldType = null;
+-    protected ?bool $required = null;
+-    protected ?string $minLength = null;
+-    protected ?string $maxLength = null;
+-
+     /**
+      * Constructor.
+      */
+     public function __construct(
+-        ?string $name = null,
+-        ?string $content = null,
+-        ?string $fieldType = null,
+-        ?bool $required = null,
+-        ?string $minLength = null,
+-        ?string $maxLength = null
++        protected ?string $name = null,
++        protected ?string $content = null,
++        protected ?string $fieldType = null,
++        protected ?bool $required = null,
++        protected ?string $minLength = null,
++        protected ?string $maxLength = null
+     ) {
+-        $this->maxLength = $maxLength;
+-        $this->minLength = $minLength;
+-        $this->required = $required;
+-        $this->fieldType = $fieldType;
+-        $this->content = $content;
+-        $this->name = $name;
+     }
+ 
+     public function getName(): string
+@@ -136,23 +123,15 @@ public function attributes(): array
+      */
+     public function attribute(string $name): ?string
+     {
+-        switch ($name) {
+-            case 'name':
+-                return $this->getName();
+-            case 'content':
+-                return $this->getContent();
+-            case 'fieldType':
+-                return $this->getFieldType();
+-            case 'required':
+-                return $this->getRequired();
+-            case 'minLength':
+-                return $this->getMinLength();
+-            case 'maxLength':
+-                return $this->getMaxLength();
+-            default:
+-                throw new PropertyNotFoundException($name, \get_class($this));
+-                break;
+-        }
++        return match ($name) {
++            'name' => $this->getName(),
++            'content' => $this->getContent(),
++            'fieldType' => $this->getFieldType(),
++            'required' => $this->getRequired(),
++            'minLength' => $this->getMinLength(),
++            'maxLength' => $this->getMaxLength(),
++            default => throw new PropertyNotFoundException($name, static::class),
++        };
+     }
+ 
+     public function isEmpty(): bool
+diff --git a/components/SEOBundle/bundle/Core/MetaNameSchema.php b/components/SEOBundle/bundle/Core/MetaNameSchema.php
+index 0a03c02d0..d63f8d351 100644
+--- a/components/SEOBundle/bundle/Core/MetaNameSchema.php
++++ b/components/SEOBundle/bundle/Core/MetaNameSchema.php
+@@ -12,6 +12,7 @@
+ 
+ namespace Novactive\Bundle\eZSEOBundle\Core;
+ 
++use Ibexa\Contracts\Core\FieldType\FieldType;
+ use Ibexa\Contracts\Core\Persistence\Content\Language\Handler as ContentLanguageHandler;
+ use Ibexa\Contracts\Core\Persistence\Content\Type as SPIContentType;
+ use Ibexa\Contracts\Core\Persistence\Content\Type\Handler as ContentTypeHandler;
+@@ -32,72 +33,55 @@
+ use Ibexa\Core\FieldType\RelationList\Value as RelationListValue;
+ use Ibexa\Core\Helper\TranslationHelper;
+ use Ibexa\Core\MVC\Exception\SourceImageNotFoundException;
+-use Ibexa\Core\Repository\Helper\NameSchemaService;
+ use Ibexa\Core\Repository\Mapper\ContentTypeDomainMapper;
++use Ibexa\Core\Repository\NameSchema\NameSchemaService;
++use Ibexa\Core\Repository\NameSchema\SchemaIdentifierExtractor;
+ use Ibexa\Core\Repository\Values\Content\VersionInfo;
+ use Ibexa\FieldTypeRichText\FieldType\RichText\Value as RichTextValue;
++use Override;
+ use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
+ 
+ class MetaNameSchema extends NameSchemaService
+ {
+-    /**
+-     * @var RichTextConverterInterface
+-     */
+-    protected $richTextConverter;
+-
+-    /**
+-     * @var VariationHandler
+-     */
+-    protected $imageVariationService;
++    protected RichTextConverterInterface $richTextConverter;
+ 
+-    /**
+-     * @var RepositoryInterface
+-     */
+-    protected $repository;
++    protected VariationHandler $imageVariationService;
+ 
+-    /**
+-     * @var TranslationHelper
+-     */
+-    protected $translationHelper;
++    protected int $fieldContentMaxLength = 255;
+ 
+-    /**
+-     * @var int
+-     */
+-    protected $fieldContentMaxLength = 255;
++    private readonly FieldType|RelationListType $relationListField;
+ 
+-    /**
+-     * @var RelationListType
+-     */
+-    private $relationListField;
++    protected ContentTypeHandler $contentTypeHandler;
+ 
+-    /**
+-     * @var ConfigResolverInterface
+-     */
+-    private $configurationResolver;
++    protected ContentTypeDomainMapper $contentTypeDomainMapper;
+ 
+     public function __construct(
+         ContentTypeHandler $contentTypeHandler,
+         FieldTypeRegistry $fieldTypeRegistry,
+         EventDispatcherInterface $eventDispatcher,
+         ContentLanguageHandler $languageHandler,
+-        RepositoryInterface $repository,
+-        TranslationHelper $translationHelper,
+-        ConfigResolverInterface $configurationResolver,
++        protected RepositoryInterface $repository,
++        protected TranslationHelper $translationHelper,
++        private readonly ConfigResolverInterface $configurationResolver,
+         array $settings = []
+     ) {
+         $settings['limit'] = $this->fieldContentMaxLength;
+-        $handler = new ContentTypeDomainMapper(
++
++        parent::__construct(
++            $fieldTypeRegistry,
++            new SchemaIdentifierExtractor(),
++            $eventDispatcher,
++            $settings
++        );
++
++        $contentTypeDomainMapper = new ContentTypeDomainMapper(
+             $contentTypeHandler,
+             $languageHandler,
+             $fieldTypeRegistry
+         );
+-
+-        parent::__construct($contentTypeHandler, $handler, $fieldTypeRegistry, $eventDispatcher, $settings);
+-
+-        $this->repository = $repository;
+-        $this->translationHelper = $translationHelper;
++        $this->contentTypeHandler = $contentTypeHandler;
++        $this->contentTypeDomainMapper = $contentTypeDomainMapper;
+         $this->relationListField = $this->fieldTypeRegistry->getFieldType('ezobjectrelationlist');
+-        $this->configurationResolver = $configurationResolver;
+     }
+ 
+     public function setRichTextConverter(RichTextConverterInterface $richTextConverter): void
+@@ -123,8 +107,8 @@ public function resolveMeta(Meta $meta, Content $content, ?ContentType $contentT
+         );
+         // we don't fallback on the other languages... it would be very bad for SEO to mix the languages
+         if (
+-            \array_key_exists($languages[0], $resolveMultilingue)
+-            && ('' !== $resolveMultilingue[$languages[0]])
++            \array_key_exists($languages[0], $resolveMultilingue) &&
++            ('' !== $resolveMultilingue[$languages[0]])
+         ) {
+             $meta->setContent($resolveMultilingue[$languages[0]]);
+ 
+@@ -254,7 +238,7 @@ protected function getVariation(
+      */
+     protected function handleRichTextValue(RichTextValue $value): string
+     {
+-        return trim(strip_tags($this->richTextConverter->convert($value->xml)->saveHTML()));
++        return trim(strip_tags((string) $this->richTextConverter->convert($value->xml)->saveHTML()));
+     }
+ 
+     /**
+@@ -303,7 +287,7 @@ protected function handleImageValue(ImageValue $value, $fieldDefinitionIdentifie
+                 $languageCode,
+                 'social_network_image'
+             );
+-        } catch (SourceImageNotFoundException $e) {
++        } catch (SourceImageNotFoundException) {
+             return '';
+         }
+     }
+@@ -319,7 +303,7 @@ protected function handleImageAssetValue(ImageAssetValue $value, $fieldDefinitio
+ 
+         try {
+             $content = $this->repository->getContentService()->loadContent($value->destinationContentId);
+-        } catch (NotFoundException $e) {
++        } catch (NotFoundException) {
+             return '';
+         }
+ 
+@@ -336,6 +320,7 @@ protected function handleImageAssetValue(ImageAssetValue $value, $fieldDefinitio
+      * Override native function as this prevent usage of `()` inside metas in Ibexa 4.6
+      * {@inheritDoc}
+      */
++    #[Override]
+     protected function filterNameSchema(string $nameSchema): array
+     {
+         $groupLookupTable = [];
+diff --git a/components/SEOBundle/bundle/Core/SeoMetas.php b/components/SEOBundle/bundle/Core/SeoMetas.php
+index 3df54730b..f903851c1 100644
+--- a/components/SEOBundle/bundle/Core/SeoMetas.php
++++ b/components/SEOBundle/bundle/Core/SeoMetas.php
+@@ -12,7 +12,7 @@
+ 
+ namespace Novactive\Bundle\eZSEOBundle\Core;
+ 
+-use EzSystems\EzPlatformAdminUi\UI\Config\ProviderInterface;
++use Ibexa\Contracts\AdminUi\UI\Config\ProviderInterface;
+ use Ibexa\Contracts\Core\SiteAccess\ConfigResolverInterface;
+ 
+ class SeoMetas implements ProviderInterface
+@@ -30,7 +30,7 @@ public function __construct(ConfigResolverInterface $configResolver)
+     /**
+      * @return mixed Anything that is serializable via json_encode()
+      */
+-    public function getConfig()
++    public function getConfig(): mixed
+     {
+         $list = [];
+         $metas = $this->configResolver->getParameter('fieldtype_metas', 'nova_ezseo');
+diff --git a/components/SEOBundle/bundle/Core/SiteAccessAwareEntityManagerFactory.php b/components/SEOBundle/bundle/Core/SiteAccessAwareEntityManagerFactory.php
+deleted file mode 100644
+index d7492a15b..000000000
+--- a/components/SEOBundle/bundle/Core/SiteAccessAwareEntityManagerFactory.php
++++ /dev/null
+@@ -1,91 +0,0 @@
+-<?php
+-
+-/**
+- * NovaeZSEOBundle.
+- *
+- * @package   Novactive\Bundle\eZSEOBundle
+- *
+- * @author    Novactive <novaseobundle@novactive.com>
+- * @copyright 2015 Novactive
+- * @license   https://github.com/Novactive/NovaeZSEOBundle/blob/master/LICENSE MIT Licence
+- */
+-
+-namespace Novactive\Bundle\eZSEOBundle\Core;
+-
+-use Doctrine\Bundle\DoctrineBundle\Mapping\ContainerEntityListenerResolver;
+-use Doctrine\Common\Cache\Psr6\DoctrineProvider;
+-use Doctrine\ORM\Configuration;
+-use Doctrine\ORM\EntityManager;
+-use Doctrine\ORM\EntityManagerInterface;
+-use Doctrine\ORM\Mapping\UnderscoreNamingStrategy;
+-use Doctrine\Persistence\ManagerRegistry as Registry;
+-use Ibexa\Bundle\Core\ApiLoader\RepositoryConfigurationProvider;
+-use Symfony\Component\Cache\Adapter\ArrayAdapter;
+-
+-class SiteAccessAwareEntityManagerFactory
+-{
+-    /**
+-     * @var Registry
+-     */
+-    private $registry;
+-
+-    /**
+-     * @var RepositoryConfigurationProvider
+-     */
+-    private $repositoryConfigurationProvider;
+-
+-    /**
+-     * @var array
+-     */
+-    private $settings;
+-
+-    /**
+-     * @var ContainerEntityListenerResolver
+-     */
+-    private $resolver;
+-
+-    public function __construct(
+-        Registry $registry,
+-        RepositoryConfigurationProvider $repositoryConfigurationProvider,
+-        ContainerEntityListenerResolver $resolver,
+-        array $settings
+-    ) {
+-        $this->registry = $registry;
+-        $this->repositoryConfigurationProvider = $repositoryConfigurationProvider;
+-        $this->settings = $settings;
+-        $this->resolver = $resolver;
+-    }
+-
+-    private function getConnectionName(): string
+-    {
+-        $config = $this->repositoryConfigurationProvider->getRepositoryConfig();
+-
+-        return $config['storage']['connection'] ?? 'default';
+-    }
+-
+-    public function get(): EntityManagerInterface
+-    {
+-        $connectionName = $this->getConnectionName();
+-        // If it is the default connection then we don't bother we can directly use the default entity Manager
+-        if ('default' === $connectionName) {
+-            return $this->registry->getManager();
+-        }
+-
+-        $connection = $this->registry->getConnection($connectionName);
+-
+-        /** @var \Doctrine\DBAL\Connection $connection */
+-        $cache = new ArrayAdapter();
+-        $config = new Configuration();
+-        $config->setMetadataCacheImpl(DoctrineProvider::wrap($cache));
+-        $driverImpl = $config->newDefaultAnnotationDriver(__DIR__.'/../Entity', false);
+-        $config->setMetadataDriverImpl($driverImpl);
+-        $config->setQueryCacheImpl(DoctrineProvider::wrap($cache));
+-        $config->setProxyDir($this->settings['cache_dir'].'/eZSEOBundle/');
+-        $config->setProxyNamespace('eZSEOBundle\Proxies');
+-        $config->setAutoGenerateProxyClasses($this->settings['debug']);
+-        $config->setEntityListenerResolver($this->resolver);
+-        $config->setNamingStrategy(new UnderscoreNamingStrategy());
+-
+-        return EntityManager::create($connection, $config);
+-    }
+-}
+diff --git a/components/SEOBundle/bundle/Core/Sitemap/QueryFactory.php b/components/SEOBundle/bundle/Core/Sitemap/QueryFactory.php
+index fa0c3e6b9..cedf2ca99 100644
+--- a/components/SEOBundle/bundle/Core/Sitemap/QueryFactory.php
++++ b/components/SEOBundle/bundle/Core/Sitemap/QueryFactory.php
+@@ -1,7 +1,5 @@
+ <?php
+ 
+-declare(strict_types=1);
+-
+ namespace Novactive\Bundle\eZSEOBundle\Core\Sitemap;
+ 
+ use Ibexa\Contracts\Core\Repository\Exceptions\NotFoundException;
+@@ -28,7 +26,7 @@ function (Repository $repository) use ($locationId) {
+                 $locationService = $repository->getLocationService();
+                 try {
+                     return $locationService->loadLocation($locationId);
+-                } catch (NotFoundException $e) {
++                } catch (NotFoundException) {
+                     return null;
+                 }
+             }
+@@ -110,7 +108,7 @@ protected function getCriteriaForExcludeConfig(
+         foreach ($contentTypeIdentifiers as $contentTypeIdentifier) {
+             try {
+                 $contentTypeService->loadContentTypeByIdentifier($contentTypeIdentifier);
+-            } catch (NotFoundException $exception) {
++            } catch (NotFoundException) {
+                 continue;
+             }
+             $criteria[] = new Criterion\ContentTypeIdentifier($contentTypeIdentifier);
+@@ -141,16 +139,14 @@ protected function getCriteriaForExcludeConfig(
+                         $state = $service->loadObjectStateByIdentifier($group, $objectStateIdentifier);
+                         $criteria[] = new Criterion\ObjectStateIdentifier($state->identifier, $group->identifier);
+                     }
+-                } catch (NotFoundException $notFoundException) {
++                } catch (NotFoundException) {
+                     continue;
+                 }
+             }
+         }
+ 
+         return array_map(
+-            function ($criterion) {
+-                return new Criterion\LogicalNot($criterion);
+-            },
++            fn ($criterion) => new Criterion\LogicalNot($criterion),
+             $criteria
+         );
+     }
+@@ -199,7 +195,7 @@ protected function getCriteriaForIncludeConfig(
+                         $state = $service->loadObjectStateByIdentifier($group, $objectStateIdentifier);
+                         $validStateIdentifiers[] = $state->identifier;
+                     }
+-                } catch (NotFoundException $notFoundException) {
++                } catch (NotFoundException) {
+                     continue;
+                 }
+                 if (count($validStateIdentifiers) > 0) {
+@@ -231,7 +227,7 @@ protected function getContentType(string $contentTypeIdentifier): ?ContentType
+     {
+         try {
+             return $this->repository->getContentTypeService()->loadContentTypeByIdentifier($contentTypeIdentifier);
+-        } catch (NotFoundException $exception) {
++        } catch (NotFoundException) {
+             return null;
+         }
+     }
+diff --git a/components/SEOBundle/bundle/Core/UrlWildcardRouter.php b/components/SEOBundle/bundle/Core/UrlWildcardRouter.php
+index 3714fbd4e..e24b1c2ce 100644
+--- a/components/SEOBundle/bundle/Core/UrlWildcardRouter.php
++++ b/components/SEOBundle/bundle/Core/UrlWildcardRouter.php
+@@ -12,9 +12,11 @@
+ 
+ namespace Novactive\Bundle\eZSEOBundle\Core;
+ 
++use Exception;
+ use Ibexa\Contracts\Core\Repository\URLWildcardService;
+ use Ibexa\Core\MVC\Symfony\Routing\UrlAliasRouter;
+ use Ibexa\Core\MVC\Symfony\Routing\UrlWildcardRouter as BaseUrlWildcardRouter;
++use Override;
+ use Symfony\Component\HttpFoundation\Request;
+ use Symfony\Component\Routing\Exception\ResourceNotFoundException;
+ 
+@@ -28,6 +30,7 @@ public function setWildcardService(URLWildcardService $wildcardService): void
+         $this->wildcardService = $wildcardService;
+     }
+ 
++    #[Override]
+     public function matchRequest(Request $request): array
+     {
+         try {
+@@ -35,11 +38,11 @@ public function matchRequest(Request $request): array
+             $requestedPath = $request->getPathInfo();
+             $requestUriFull = $request->getSchemeAndHttpHost().$requestedPath;
+             $urlWildcard = $this->wildcardService->translate($requestUriFull);
+-        } catch (\Exception $e) {
++        } catch (Exception $e) {
+             try {
+                 // Manage full url : /uri
+                 $urlWildcard = $this->wildcardService->translate($requestedPath);
+-            } catch (\Exception $e) {
++            } catch (Exception $e) {
+                 throw new ResourceNotFoundException($e->getMessage(), $e->getCode(), $e);
+             }
+         }
+@@ -48,11 +51,14 @@ public function matchRequest(Request $request): array
+             '_route' => UrlAliasRouter::URL_ALIAS_ROUTE_NAME,
+         ];
+ 
+-        if (0 === strpos($urlWildcard->uri, 'http://') || 'https://' === substr($urlWildcard->uri, 0, 8)) {
+-            $params += ['semanticPathinfo' => trim($urlWildcard->uri, '/')];
++        if (
++            str_starts_with((string) $urlWildcard->uri, 'http://') ||
++            str_starts_with((string) $urlWildcard->uri, 'https://')
++        ) {
++            $params += ['semanticPathinfo' => trim((string) $urlWildcard->uri, '/')];
+             $params += ['prependSiteaccessOnRedirect' => false];
+         } else {
+-            $params += ['semanticPathinfo' => '/'.trim($urlWildcard->uri, '/')];
++            $params += ['semanticPathinfo' => '/'.trim((string) $urlWildcard->uri, '/')];
+         }
+ 
+         // In URLAlias terms, "forward" means "redirect".
+diff --git a/components/SEOBundle/bundle/DependencyInjection/Configuration.php b/components/SEOBundle/bundle/DependencyInjection/Configuration.php
+index 4443f944c..de666cc02 100644
+--- a/components/SEOBundle/bundle/DependencyInjection/Configuration.php
++++ b/components/SEOBundle/bundle/DependencyInjection/Configuration.php
+@@ -95,9 +95,7 @@ public function getConfigTreeBuilder(): TreeBuilder
+             ->beforeNormalization()
+             ->ifString()
+             ->then(
+-                function ($value) {
+-                    return ['path' => $value];
+-                }
++                fn ($value) => ['path' => $value]
+             )
+             ->end()
+             ->children()
+diff --git a/components/SEOBundle/bundle/DependencyInjection/NovaeZSEOExtension.php b/components/SEOBundle/bundle/DependencyInjection/NovaeZSEOExtension.php
+index e93c1e945..62a5d347c 100644
+--- a/components/SEOBundle/bundle/DependencyInjection/NovaeZSEOExtension.php
++++ b/components/SEOBundle/bundle/DependencyInjection/NovaeZSEOExtension.php
+@@ -14,6 +14,7 @@
+ 
+ use Ibexa\Bundle\Core\DependencyInjection\Configuration\SiteAccessAware\ConfigurationProcessor;
+ use Ibexa\Bundle\Core\DependencyInjection\Configuration\SiteAccessAware\ContextualizerInterface;
++use Override;
+ use Symfony\Component\Config\FileLocator;
+ use Symfony\Component\Config\Resource\FileResource;
+ use Symfony\Component\DependencyInjection\ContainerBuilder;
+@@ -24,6 +25,7 @@
+ 
+ class NovaeZSEOExtension extends Extension implements PrependExtensionInterface
+ {
++    #[Override]
+     public function getAlias(): string
+     {
+         return 'nova_ezseo';
+diff --git a/components/SEOBundle/bundle/Entity/RedirectImportHistory.php b/components/SEOBundle/bundle/Entity/RedirectImportHistory.php
+index 36aca77ad..7c5435d3f 100644
+--- a/components/SEOBundle/bundle/Entity/RedirectImportHistory.php
++++ b/components/SEOBundle/bundle/Entity/RedirectImportHistory.php
+@@ -15,43 +15,34 @@
+ use DateTime;
+ use Doctrine\ORM\Mapping as ORM;
+ 
+-/**
+- * @ORM\Table(name="novaseo_redirect_import_history")
+- *
+- * @ORM\Entity()
+- */
++#[ORM\Table(name: 'novaseo_redirect_import_history')]
++#[ORM\Entity]
+ class RedirectImportHistory
+ {
+     /**
+      * @var int
+-     *
+-     * @ORM\Column(type="integer")
+-     *
+-     * @ORM\Id
+-     *
+-     * @ORM\GeneratedValue(strategy="IDENTITY")
+      */
++    #[ORM\Column(type: 'integer')]
++    #[ORM\Id]
++    #[ORM\GeneratedValue(strategy: 'IDENTITY')]
+     protected $id;
+ 
+     /**
+      * @var string
+-     *
+-     * @ORM\Column(type="string")
+      */
++    #[ORM\Column(type: 'string')]
+     protected $nameFile;
+ 
+     /**
+-     * @var \DateTime
+-     *
+-     * @ORM\Column(type="datetime")
++     * @var DateTime
+      */
++    #[ORM\Column(type: 'datetime')]
+     protected $date;
+ 
+     /**
+      * @var string
+-     *
+-     * @ORM\Column(type="string")
+      */
++    #[ORM\Column(type: 'string')]
+     protected $path;
+ 
+     public function getId(): int
+@@ -74,12 +65,12 @@ public function setNameFile(string $nameFile): void
+         $this->nameFile = $nameFile;
+     }
+ 
+-    public function getDate(): \DateTime
++    public function getDate(): DateTime
+     {
+         return $this->date;
+     }
+ 
+-    public function setDate(\DateTime $date): void
++    public function setDate(DateTime $date): void
+     {
+         $this->date = $date;
+     }
+diff --git a/components/SEOBundle/bundle/Form/Type/ImportUrlsType.php b/components/SEOBundle/bundle/Form/Type/ImportUrlsType.php
+index a8c49cd19..a879ba35f 100644
+--- a/components/SEOBundle/bundle/Form/Type/ImportUrlsType.php
++++ b/components/SEOBundle/bundle/Form/Type/ImportUrlsType.php
+@@ -12,6 +12,7 @@
+ 
+ namespace Novactive\Bundle\eZSEOBundle\Form\Type;
+ 
++use Override;
+ use Symfony\Component\Form\AbstractType;
+ use Symfony\Component\Form\Extension\Core\Type\FileType;
+ use Symfony\Component\Form\Extension\Core\Type\SubmitType;
+@@ -34,6 +35,7 @@ public function buildForm(FormBuilderInterface $builder, array $options): void
+             );
+     }
+ 
++    #[Override]
+     public function getBlockPrefix(): string
+     {
+         return 'novaseo_import_urls';
+diff --git a/components/SEOBundle/bundle/Form/Type/MetaType.php b/components/SEOBundle/bundle/Form/Type/MetaType.php
+index 6d3e3f428..a5dc5f2c5 100644
+--- a/components/SEOBundle/bundle/Form/Type/MetaType.php
++++ b/components/SEOBundle/bundle/Form/Type/MetaType.php
+@@ -15,6 +15,7 @@
+ use Ibexa\Contracts\Core\SiteAccess\ConfigResolverInterface;
+ use Novactive\Bundle\eZSEOBundle\Core\FieldType\MetaFieldConverter\SeoMetadataFieldTypeRegistry;
+ use Novactive\Bundle\eZSEOBundle\Core\Meta;
++use Override;
+ use Symfony\Component\Form\AbstractType;
+ use Symfony\Component\Form\Extension\Core\Type\HiddenType;
+ use Symfony\Component\Form\FormBuilderInterface;
+@@ -27,18 +28,13 @@
+  */
+ class MetaType extends AbstractType
+ {
+-    protected SeoMetadataFieldTypeRegistry $metadataFieldTypeRegistry;
+-    protected ConfigResolverInterface $configResolver;
+-
+     /**
+      * Constructor.
+      */
+     public function __construct(
+-        ConfigResolverInterface $configResolver,
+-        SeoMetadataFieldTypeRegistry $metadataFieldTypeRegistry
++        protected ConfigResolverInterface $configResolver,
++        protected SeoMetadataFieldTypeRegistry $metadataFieldTypeRegistry
+     ) {
+-        $this->metadataFieldTypeRegistry = $metadataFieldTypeRegistry;
+-        $this->configResolver = $configResolver;
+     }
+ 
+     public function getName(): string
+@@ -46,6 +42,7 @@ public function getName(): string
+         return $this->getBlockPrefix();
+     }
+ 
++    #[Override]
+     public function getBlockPrefix(): string
+     {
+         return 'novaseo_fieldtype_metas_meta';
+@@ -82,10 +79,7 @@ private function getConstraints(array $config)
+         $constraints = [];
+ 
+         if (isset($config['minLength']) || isset($config['maxLength'])) {
+-            $constraints[] = new Length([
+-                'min' => $config['minLength'] ?? null,
+-                'max' => $config['maxLength'] ?? null,
+-            ]);
++            $constraints[] = new Length(min: $config['minLength'] ?? null, max: $config['maxLength'] ?? null);
+         }
+ 
+         if (isset($config['required'])) {
+diff --git a/components/SEOBundle/bundle/Form/Type/MetasCollectionType.php b/components/SEOBundle/bundle/Form/Type/MetasCollectionType.php
+index 5049ef698..5e7aeec75 100644
+--- a/components/SEOBundle/bundle/Form/Type/MetasCollectionType.php
++++ b/components/SEOBundle/bundle/Form/Type/MetasCollectionType.php
+@@ -12,6 +12,7 @@
+ 
+ namespace Novactive\Bundle\eZSEOBundle\Form\Type;
+ 
++use Override;
+ use Symfony\Component\Form\AbstractType;
+ use Symfony\Component\Form\Extension\Core\Type\CollectionType;
+ use Symfony\Component\OptionsResolver\OptionsResolver;
+@@ -26,6 +27,7 @@ public function getName(): string
+         return $this->getBlockPrefix();
+     }
+ 
++    #[Override]
+     public function getBlockPrefix(): string
+     {
+         return 'novaseo_fieldtype_metas_metas';
+@@ -46,6 +48,7 @@ public function configureOptions(OptionsResolver $resolver): void
+         );
+     }
+ 
++    #[Override]
+     public function getParent(): string
+     {
+         return CollectionType::class;
+diff --git a/components/SEOBundle/bundle/Form/Type/MetasFieldType.php b/components/SEOBundle/bundle/Form/Type/MetasFieldType.php
+index 0540275ea..338587591 100644
+--- a/components/SEOBundle/bundle/Form/Type/MetasFieldType.php
++++ b/components/SEOBundle/bundle/Form/Type/MetasFieldType.php
+@@ -13,6 +13,7 @@
+ namespace Novactive\Bundle\eZSEOBundle\Form\Type;
+ 
+ use Novactive\Bundle\eZSEOBundle\Core\FieldType\Metas\Value;
++use Override;
+ use Symfony\Component\Form\AbstractType;
+ use Symfony\Component\Form\FormBuilderInterface;
+ use Symfony\Component\OptionsResolver\OptionsResolver;
+@@ -27,6 +28,7 @@ public function getName(): string
+         return $this->getBlockPrefix();
+     }
+ 
++    #[Override]
+     public function getBlockPrefix(): string
+     {
+         return 'novaseo_fieldtype_metas';
+diff --git a/components/SEOBundle/bundle/NovaeZSEOBundle.php b/components/SEOBundle/bundle/NovaeZSEOBundle.php
+index a2658060e..322b1ac13 100644
+--- a/components/SEOBundle/bundle/NovaeZSEOBundle.php
++++ b/components/SEOBundle/bundle/NovaeZSEOBundle.php
+@@ -16,6 +16,7 @@
+ use Novactive\Bundle\eZSEOBundle\Core\FieldType\MetaFieldConverter\SeoMetadataFieldTypeInterface;
+ use Novactive\Bundle\eZSEOBundle\DependencyInjection\Compiler\CustomFallbackPass;
+ use Novactive\Bundle\eZSEOBundle\DependencyInjection\Security\PolicyProvider\PolicyProvider;
++use Override;
+ use Symfony\Component\DependencyInjection\ContainerBuilder;
+ use Symfony\Component\DependencyInjection\Extension\ExtensionInterface;
+ use Symfony\Component\HttpKernel\Bundle\Bundle;
+@@ -33,6 +34,7 @@ public function build(ContainerBuilder $container): void
+             ->addTag('seometa.fieldtype');
+     }
+ 
++    #[Override]
+     public function getContainerExtension(): ?ExtensionInterface
+     {
+         if (null === $this->extension) {
+@@ -40,7 +42,7 @@ public function getContainerExtension(): ?ExtensionInterface
+ 
+             if (null !== $extension) {
+                 if (!$extension instanceof ExtensionInterface) {
+-                    $fqdn = \get_class($extension);
++                    $fqdn = $extension::class;
+                     $message = 'Extension %s must implement %s.';
+                     throw new LogicException(sprintf($message, $fqdn, ExtensionInterface::class));
+                 }
+diff --git a/components/SEOBundle/bundle/Resources/config/ibexa.yaml b/components/SEOBundle/bundle/Resources/config/ibexa.yaml
+index efa81ce57..4fc39fdd0 100644
+--- a/components/SEOBundle/bundle/Resources/config/ibexa.yaml
++++ b/components/SEOBundle/bundle/Resources/config/ibexa.yaml
+@@ -2,6 +2,6 @@ orm:
+   entity_mappings:
+     NovaeZSEOBundle:
+       is_bundle: true
+-      type: annotation
++      type: attribute
+       dir: Entity
+-      prefix: Novactive\Bundle\eZSEOBundle\Entity
+\ No newline at end of file
++      prefix: Novactive\Bundle\eZSEOBundle\Entity
+diff --git a/components/SEOBundle/bundle/Resources/config/routing/main.yaml b/components/SEOBundle/bundle/Resources/config/routing/main.yaml
+index 7aec3655f..04e1b32a9 100644
+--- a/components/SEOBundle/bundle/Resources/config/routing/main.yaml
++++ b/components/SEOBundle/bundle/Resources/config/routing/main.yaml
+@@ -1,8 +1,8 @@
+ _novaezseoRoutes:
+     resource: "@NovaeZSEOBundle/Controller/"
+-    type:     annotation
++    type:     attribute
+     prefix:   /
+ 
+ _novaezseo_admin_ui:
+     resource: "@NovaeZSEOBundle/Controller/Admin"
+-    type:     annotation
++    type:     attribute
+diff --git a/components/SEOBundle/bundle/Resources/config/services.yml b/components/SEOBundle/bundle/Resources/config/services.yml
+index 42fb577ab..c060d7c01 100644
+--- a/components/SEOBundle/bundle/Resources/config/services.yml
++++ b/components/SEOBundle/bundle/Resources/config/services.yml
+@@ -10,7 +10,7 @@ services:
+         autoconfigure: true
+         public: false
+         bind:
+-            $entityManager: "@novaezeo.doctrine.entity_manager"
++            $entityManager: '@ibexa.doctrine.orm.entity_manager'
+ 
+     Novactive\Bundle\eZSEOBundle\Core\FieldType\MetaFieldConverter\:
+         resource: '../../Core/FieldType/MetaFieldConverter/*'
+@@ -54,11 +54,11 @@ services:
+     Novactive\Bundle\eZSEOBundle\Core\MetaNameSchema:
+         lazy: true
+         arguments:
+-            $contentTypeHandler: "@Ibexa\\Contracts\\Core\\Persistence\\Content\\Type\\Handler"
+-            $languageHandler: "@Ibexa\\Core\\Persistence\\Cache\\ContentLanguageHandler"
+-            $translationHelper: "@Ibexa\\Core\\Helper\\TranslationHelper"
++            $contentTypeHandler: '@Ibexa\Contracts\Core\Persistence\Content\Type\Handler'
++            $languageHandler: '@Ibexa\Contracts\Core\Persistence\Content\Language\Handler'
++            $translationHelper: '@Ibexa\Core\Helper\TranslationHelper'
+         calls:
+-            - [setRichTextConverter, ["@Ibexa\\FieldTypeRichText\\RichText\\Converter\\Html5"]]
++            - [setRichTextConverter, ['@Ibexa\FieldTypeRichText\RichText\Converter\Html5']]
+             # Note: injecting lower layer Variation Handler (AliasGenerator) as a workaround for missing Public API objects context
+             - [setImageVariationService, ["@ibexa.image_alias.imagine.alias_generator"]]
+ 
+@@ -75,18 +75,9 @@ services:
+             - { name: kernel.event_listener, event: "ezplatform_admin_ui.menu_configure.main_menu", method: "onMenuConfigure",  priority: -100 }
+ 
+     Novactive\Bundle\eZSEOBundle\Core\Helper\ImportUrlsHelper:
+-        $ioService: '@ezseo_importurls.ibexa.core.io_service'
+-        $cacheDirectory: '%kernel.cache_dir%'
+-
+-    Novactive\Bundle\eZSEOBundle\Core\SiteAccessAwareEntityManagerFactory:
+         arguments:
+-            $repositoryConfigurationProvider: "@Ibexa\\Bundle\\Core\\ApiLoader\\RepositoryConfigurationProvider"
+-            $resolver: "@doctrine.orm.default_entity_listener_resolver"
+-            $settings: { debug: "%kernel.debug%", cache_dir: "%kernel.cache_dir%" }
+-
+-    novaezeo.doctrine.entity_manager:
+-        class: Doctrine\ORM\EntityManagerInterface
+-        factory: ['@Novactive\Bundle\eZSEOBundle\Core\SiteAccessAwareEntityManagerFactory', 'get']
++            $ioService: '@ezseo_importurls.ibexa.core.io_service'
++            $cacheDirectory: '%kernel.cache_dir%'
+ 
+     Novactive\Bundle\eZSEOBundle\Core\Sitemap\QueryFactory: ~
+ 
+diff --git a/components/SEOBundle/bundle/Resources/views/commun/paginator.html.twig b/components/SEOBundle/bundle/Resources/views/commun/paginator.html.twig
+index e1860d403..c408b22ad 100644
+--- a/components/SEOBundle/bundle/Resources/views/commun/paginator.html.twig
++++ b/components/SEOBundle/bundle/Resources/views/commun/paginator.html.twig
+@@ -1,12 +1,12 @@
+ {% if pager.haveToPaginate %}
+     <div class="row justify-content-center align-items-center mb-2">
+-                <span class="ez-pagination__text">
++                <span class="ibexa-pagination__text">
+                     {{ 'section.viewing'|trans({
+                         '%viewing%': pager.currentPageResults|length,
+                         '%total%': pager.nbResults})|desc('Viewing <strong>%viewing%</strong> out of <strong>%total%</strong> items')|raw }}
+                 </span>
+     </div>
+-    <div class="row justify-content-center align-items-center ez-pagination__btn mb-5">
++    <div class="row justify-content-center align-items-center ibexa-pagination__btn mb-5">
+         {{ pagerfanta(pager, 'ibexa') }}
+     </div>
+ {% endif %}
+diff --git a/components/SEOBundle/bundle/Resources/views/fields/fielddefinition_settings.html.twig b/components/SEOBundle/bundle/Resources/views/fields/fielddefinition_settings.html.twig
+index a82ca1e9b..cf7401454 100644
+--- a/components/SEOBundle/bundle/Resources/views/fields/fielddefinition_settings.html.twig
++++ b/components/SEOBundle/bundle/Resources/views/fields/fielddefinition_settings.html.twig
+@@ -1,11 +1,11 @@
+ {% extends '@IbexaCore/fielddefinition_settings.html.twig' %}
+ 
+ {% block novaseometas_settings %}
+-    <ul class="ez-fielddefinition-settings ez-fielddefinition-{{ fielddefinition.fieldTypeIdentifier }}-settings">
++    <ul class="ibexa-fielddefinition-settings ibexa-fielddefinition-{{ fielddefinition.fieldTypeIdentifier }}-settings">
+         {% for metaIdentifier, metaValue in settings.configuration %}
+-            <li class="ez-fielddefinition-setting meta-value">
+-                <div class="ez-fielddefinition-setting-name">{{ metaIdentifier|capitalize }}</div>
+-                <div class="ez-fielddefinition-setting-value">{{ metaValue ?: (nova_ezseo.fieldtype_metas[metaIdentifier] is defined ? nova_ezseo.fieldtype_metas[metaIdentifier].default_pattern) }}</div>
++            <li class="ibexa-fielddefinition-setting meta-value">
++                <div class="ibexa-fielddefinition-setting-name">{{ metaIdentifier|capitalize }}</div>
++                <div class="ibexa-fielddefinition-setting-value">{{ metaValue ?: (nova_ezseo.fieldtype_metas[metaIdentifier] is defined ? nova_ezseo.fieldtype_metas[metaIdentifier].default_pattern) }}</div>
+             </li>
+         {% endfor %}
+     </ul>
+diff --git a/components/SEOBundle/bundle/Resources/views/fields/novaseometas_admin.html.twig b/components/SEOBundle/bundle/Resources/views/fields/novaseometas_admin.html.twig
+index 6b857cae6..a63b5323f 100644
+--- a/components/SEOBundle/bundle/Resources/views/fields/novaseometas_admin.html.twig
++++ b/components/SEOBundle/bundle/Resources/views/fields/novaseometas_admin.html.twig
+@@ -4,7 +4,7 @@
+     <ul class="novaseobundle-preview-field">
+     {% for meta in field.value.metas %}
+         {% if nova_ezseo.fieldtype_metas[meta.name] is defined %}
+-            <li class="ez-field meta-value">
++            <li class="ibexa-field meta-value">
+                 {% set default_value = nova_ezseo.fieldtype_metas[meta.name] %}
+                 <b>{{ default_value.label }}:</b>
+                 {{ meta.isEmpty() ? default_value.default_pattern|raw|escape : meta.content }}
+diff --git a/components/SEOBundle/bundle/Resources/views/platform_admin/create_url_wildcard.html.twig b/components/SEOBundle/bundle/Resources/views/platform_admin/create_url_wildcard.html.twig
+index 09d375fad..634db6707 100644
+--- a/components/SEOBundle/bundle/Resources/views/platform_admin/create_url_wildcard.html.twig
++++ b/components/SEOBundle/bundle/Resources/views/platform_admin/create_url_wildcard.html.twig
+@@ -61,8 +61,8 @@
+                 </div>
+             </div>
+ 
+-            <div class="ez-table-header">
+-                <div class="ez-table-header__headline"></div>
++            <div class="ibexa-table-header">
++                <div class="ibexa-table-header__headline"></div>
+             </div>
+         </div>
+     </section>
+diff --git a/components/SEOBundle/bundle/Resources/views/platform_admin/history_urls_imported.html.twig b/components/SEOBundle/bundle/Resources/views/platform_admin/history_urls_imported.html.twig
+index cc5bf5cdd..2b5e43720 100644
+--- a/components/SEOBundle/bundle/Resources/views/platform_admin/history_urls_imported.html.twig
++++ b/components/SEOBundle/bundle/Resources/views/platform_admin/history_urls_imported.html.twig
+@@ -12,8 +12,8 @@
+             {{ include("@NovaeZSEO/commun/paginator.html.twig") }}
+             <!-- template pagination end -->
+         {% endif %}
+-        <div class="ez-table-header">
+-            <div class="ez-table-header__headline">{{ 'nova.history.list.menu.label'|trans }}</div>
++        <div class="ibexa-table-header">
++            <div class="ibexa-table-header__headline">{{ 'nova.history.list.menu.label'|trans }}</div>
+         </div>
+         <table class="table table-striped mb-3">
+             <thead>
+diff --git a/components/SEOBundle/bundle/Resources/views/platform_admin/import_urls.html.twig b/components/SEOBundle/bundle/Resources/views/platform_admin/import_urls.html.twig
+index ea69726bb..33fcbfdd9 100644
+--- a/components/SEOBundle/bundle/Resources/views/platform_admin/import_urls.html.twig
++++ b/components/SEOBundle/bundle/Resources/views/platform_admin/import_urls.html.twig
+@@ -16,8 +16,8 @@
+             </div>
+         {% endif %}
+ 
+-        <div class="ez-table-header">
+-            <div class="ez-table-header__headline">{{ 'nova.import.root.menu.label'|trans }}</div>
++        <div class="ibexa-table-header">
++            <div class="ibexa-table-header__headline">{{ 'nova.import.root.menu.label'|trans }}</div>
+         </div>
+ 
+         <div class="novaseo-box">
+@@ -29,7 +29,7 @@
+                 <div class="novaseo-upload-box">
+                     <div class="novaseo-upload-data-source">
+                         <div class="novaseo-upload-btn">
+-                            <svg class="ez-icon">
++                            <svg class="ibexa-icon">
+                                 <use xlink:href="/bundles/ibexaadminui/img/ibexa-icons.svg#upload"></use>
+                             </svg>
+                             <span>{{ 'nova.import.root.form.upload_file_button'|trans }}</span>
+@@ -51,8 +51,8 @@
+     </section>
+     {% if pager is defined %}
+         <section class="container mt-4 px-5">
+-            <div class="ez-table-header">
+-                <div class="ez-table-header__headline">{{ 'nova.import.list.menu.label'|trans({"%totalImported%": totalImported is defined ? totalImported : 0 ,"%totalUrls%": totalUrls is defined ? totalUrls : 0 }) }}</div>
++            <div class="ibexa-table-header">
++                <div class="ibexa-table-header__headline">{{ 'nova.import.list.menu.label'|trans({"%totalImported%": totalImported is defined ? totalImported : 0 ,"%totalUrls%": totalUrls is defined ? totalUrls : 0 }) }}</div>
+             </div>
+             <table class="table table-striped mb-3">
+                 <thead>
+diff --git a/components/SEOBundle/bundle/Resources/views/platform_admin/list_url_wildcard.html.twig b/components/SEOBundle/bundle/Resources/views/platform_admin/list_url_wildcard.html.twig
+index 43501285d..aa1ff611d 100644
+--- a/components/SEOBundle/bundle/Resources/views/platform_admin/list_url_wildcard.html.twig
++++ b/components/SEOBundle/bundle/Resources/views/platform_admin/list_url_wildcard.html.twig
+@@ -11,8 +11,8 @@
+         <!-- template pagination -->
+         {{ include("@NovaeZSEO/commun/paginator.html.twig") }}
+         <!-- template pagination end -->
+-        <div class="ez-table-header">
+-            <div class="ez-table-header__headline">{{ 'nova.redirect.list.menu.label'|trans({"%total%": pager.nbResults}) }}</div>
++        <div class="ibexa-table-header">
++            <div class="ibexa-table-header__headline">{{ 'nova.redirect.list.menu.label'|trans({"%total%": pager.nbResults}) }}</div>
+         </div>
+         {{ form_start(formDelete, {'attr': {'class': ''}}) }}
+             <table class="table table-striped mb-3">
+diff --git a/components/SEOBundle/bundle/Twig/NovaeZSEOExtension.php b/components/SEOBundle/bundle/Twig/NovaeZSEOExtension.php
+index 78d7a4464..9070f7ce7 100644
+--- a/components/SEOBundle/bundle/Twig/NovaeZSEOExtension.php
++++ b/components/SEOBundle/bundle/Twig/NovaeZSEOExtension.php
+@@ -25,11 +25,9 @@
+ use Novactive\Bundle\eZSEOBundle\Core\FieldType\Metas\Value as MetasFieldValue;
+ use Novactive\Bundle\eZSEOBundle\Core\Meta;
+ use Novactive\Bundle\eZSEOBundle\Core\MetaNameSchema;
+-use Twig\Extension\AbstractExtension;
+ use Twig\Extension\GlobalsInterface;
+-use Twig\TwigFilter;
+ 
+-class NovaeZSEOExtension extends AbstractExtension implements GlobalsInterface
++class NovaeZSEOExtension implements GlobalsInterface
+ {
+     /**
+      * The Ibexa Platform object name pattern service (extended).
+@@ -83,20 +81,13 @@ public function setCustomFallbackService(CustomFallbackInterface $service)
+         $this->customFallBackService = $service;
+     }
+ 
+-    public function getFilters()
+-    {
+-        return [
+-            new TwigFilter('compute_novaseometas', [$this, 'computeMetas']),
+-            new TwigFilter('getposixlocale_novaseometas', [$this, 'getPosixLocale']),
+-            new TwigFilter('fallback_novaseometas', [$this, 'getFallbackedMetaContent']),
+-        ];
+-    }
+-
++    #[\Twig\Attribute\AsTwigFilter(name: 'getposixlocale_novaseometas')]
+     public function getPosixLocale(string $ibexaLocale): ?string
+     {
+         return $this->localeConverter->convertToPOSIX($ibexaLocale);
+     }
+ 
++    #[\Twig\Attribute\AsTwigFilter(name: 'fallback_novaseometas')]
+     public function getFallbackedMetaContent(ContentInfo $contentInfo, string $metaName): string
+     {
+         if ($this->customFallBackService instanceof CustomFallbackInterface) {
+@@ -110,6 +101,7 @@ public function getFallbackedMetaContent(ContentInfo $contentInfo, string $metaN
+      * Compute Metas of the Field thanks to its Content and the Fallback.
+      */
+     // @param $content: use type Content rather than ContentInfo, the last one is @deprecated
++    #[\Twig\Attribute\AsTwigFilter(name: 'compute_novaseometas')]
+     public function computeMetas(Field $field, $content): string
+     {
+         $fallback = false;
+@@ -118,10 +110,10 @@ public function computeMetas(Field $field, $content): string
+         if ($content instanceof ContentInfo) {
+             try {
+                 $content = $this->ibexaRepository->getContentService()->loadContentByContentInfo($content, $languages);
+-            } catch (NotFoundException|UnauthorizedException $e) {
++            } catch (NotFoundException|UnauthorizedException) {
+                 return '';
+             }
+-        } elseif (!($content instanceof Content)) {
++        } elseif (!$content instanceof Content) {
+             throw new InvalidArgumentType('$content', 'Content of ContentType');
+         }
+ 
+diff --git a/components/SEOBundle/ci-config.yaml b/components/SEOBundle/ci-config.yaml
+index c0331fdb9..888b80b55 100644
+--- a/components/SEOBundle/ci-config.yaml
++++ b/components/SEOBundle/ci-config.yaml
+@@ -1,3 +1,3 @@
+-install: false
+-test: false
+-required_ibexa_version: ^4.6
++install: true
++test: true
++required_ibexa_version: ^5.0
+diff --git a/components/SEOBundle/tests/Tests/SEOControllerPantherTest.php b/components/SEOBundle/tests/Tests/SEOControllerPantherTest.php
+index d95da133f..8f55440c9 100644
+--- a/components/SEOBundle/tests/Tests/SEOControllerPantherTest.php
++++ b/components/SEOBundle/tests/Tests/SEOControllerPantherTest.php
+@@ -10,8 +10,6 @@
+  * @license   https://github.com/Novactive/NovaeZSEOBundle/blob/master/LICENSE MIT Licence
+  */
+ 
+-declare(strict_types=1);
+-
+ namespace Novactive\Bundle\eZSEOBundle\Tests;
+ 
+ use Novactive\eZPlatform\Bundles\Tests\BrowserHelper;
+diff --git a/components/SEOBundle/tests/Tests/SitemapControllerPantherTest.php b/components/SEOBundle/tests/Tests/SitemapControllerPantherTest.php
+index 9027b09e6..13d966e17 100644
+--- a/components/SEOBundle/tests/Tests/SitemapControllerPantherTest.php
++++ b/components/SEOBundle/tests/Tests/SitemapControllerPantherTest.php
+@@ -10,8 +10,6 @@
+  * @license   https://github.com/Novactive/NovaeZSEOBundle/blob/master/LICENSE MIT Licence
+  */
+ 
+-declare(strict_types=1);
+-
+ namespace Novactive\Bundle\eZSEOBundle\Tests;
+ 
+ use Novactive\eZPlatform\Bundles\Tests\BrowserHelper;
+
+From bc9a0b032d302c850657280c4191cb9fec64fa43 Mon Sep 17 00:00:00 2001
+From: Florian ALEXANDRE <f.alexandre@novactive.com>
+Date: Wed, 18 Feb 2026 10:41:02 +0100
+Subject: [PATCH 2/4] feat: update development stack to work on Ibexa 5
+
+---
+ bin/wrapbundle | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/bin/wrapbundle b/bin/wrapbundle
+index 0857af7fc..c04a3bc5c 100755
+--- a/bin/wrapbundle
++++ b/bin/wrapbundle
+@@ -25,7 +25,7 @@ $bundleComposerName = $bundleComposerJson['name'];
+ $bundleName = str_replace( '/', '_', $bundleComposerName );
+ 
+ exec("cd {$appRootDir} && composer config repositories.{$bundleName} '{\"type\": \"path\", \"url\": \"../components/{$componentName}\", \"options\": {\"symlink\": true}}' --json");
+-exec("cd {$appRootDir} && composer require {$bundleComposerName}:dev-master --no-update");
++exec("cd {$appRootDir} && composer require {$bundleComposerName}:* --no-update");
+ exec("cd {$appRootDir} && yarn install --cwd ../components/{$componentName}");
+ 
+ 
+
+From f1642321c765174fd208118f771c3eaf75d89116 Mon Sep 17 00:00:00 2001
+From: Florian ALEXANDRE <f.alexandre@novactive.com>
+Date: Thu, 5 Mar 2026 13:54:46 +0100
+Subject: [PATCH 3/4] feat: update development stack to work on Ibexa 5
+
+---
+ .github/workflows/main-ci.yaml | 1 +
+ Makefile                       | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/.github/workflows/main-ci.yaml b/.github/workflows/main-ci.yaml
+index e22a95913..1e5c04317 100644
+--- a/.github/workflows/main-ci.yaml
++++ b/.github/workflows/main-ci.yaml
+@@ -117,6 +117,7 @@ jobs:
+ 
+             -   name: Install All the bundle on Top of a fresh eZ Installation
+                 run: |
++                    composer config minimum-stability dev
+                     for COMPONENT in `ls components`; do
+                         if COMPONENT=${COMPONENT} bin/ci-should install; then
+                             echo ::group::..:: ${COMPONENT} ::..
+diff --git a/Makefile b/Makefile
+index 5b56a2ec4..b43d58b5e 100644
+--- a/Makefile
++++ b/Makefile
+@@ -57,6 +57,7 @@ wrap-bundles:
+ 			ddev exec -d /var/www/html "COMPONENT_CONFIG_DIR='components/$${COMPONENT}/tests/provisioning' COMPONENT=$${COMPONENT} bin/wrapbundle"; \
+ 		fi \
+ 	done
++	@ddev exec "$(COMPOSER) config minimum-stability dev"
+ 	@ddev exec "$(COMPOSER) update"
+ 	@ddev exec "$(CONSOLE) d:s:u --force"
+ 
+
+From a1f75b6f8e52562242f054b87e0c111a50d13ac0 Mon Sep 17 00:00:00 2001
+From: Florian ALEXANDRE <f.alexandre@novactive.com>
+Date: Thu, 5 Mar 2026 14:24:25 +0100
+Subject: [PATCH 4/4] feat: update development stack to work on Ibexa 5
+
+---
+ .github/workflows/main-ci.yaml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/.github/workflows/main-ci.yaml b/.github/workflows/main-ci.yaml
+index 1e5c04317..4067307b8 100644
+--- a/.github/workflows/main-ci.yaml
++++ b/.github/workflows/main-ci.yaml
+@@ -117,7 +117,6 @@ jobs:
+ 
+             -   name: Install All the bundle on Top of a fresh eZ Installation
+                 run: |
+-                    composer config minimum-stability dev
+                     for COMPONENT in `ls components`; do
+                         if COMPONENT=${COMPONENT} bin/ci-should install; then
+                             echo ::group::..:: ${COMPONENT} ::..
+@@ -128,6 +127,7 @@ jobs:
+                     cd ibexa
+                     echo ::group::..:: Update Composer ::..
+                     rm var/cache/prod -rf
++                    composer config minimum-stability dev
+                     composer update
+                     bin/console d:s:u --force
+                     echo ::endgroup::
