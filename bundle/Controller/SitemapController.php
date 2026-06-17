@@ -132,7 +132,7 @@ class SitemapController extends Controller
                 continue;
             }
 
-            if (!str_starts_with($url, 'view/content/')) {
+            if (str_starts_with($url, 'view/content/')) {
                 continue;
             }
 
